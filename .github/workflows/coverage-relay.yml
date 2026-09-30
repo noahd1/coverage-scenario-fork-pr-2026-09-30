@@ -5,8 +5,9 @@ name: Coverage relay
 # artifact; this workflow runs in the base repository's context, where an
 # OIDC token is available, and publishes that file against the PR.
 #
-# It never executes code from the pull request: the checkout is only there so
-# the CLI can validate coverage paths against the PR's tree.
+# It never fetches or executes code from the pull request. Without a checkout
+# the CLI cannot validate coverage paths or read the commit time, so the commit
+# time comes from the event and validation is off.
 
 on:
   workflow_run:
@@ -40,11 +41,6 @@ jobs:
           fi
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
-      - name: Check out the pull request's tree
-        uses: actions/checkout@v4
-        with:
-          ref: refs/pull/${{ steps.pr.outputs.number }}/head
-
       - name: Download the coverage file saved by the PR run
         uses: actions/download-artifact@v4
         with:
@@ -60,6 +56,7 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_COMMIT_TIME: ${{ github.event.workflow_run.head_commit.timestamp }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           token=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
@@ -68,5 +65,7 @@ jobs:
           QLTY_COVERAGE_TOKEN="$token" qlty coverage publish \
             --override-commit-sha "$HEAD_SHA" \
             --override-branch "$HEAD_BRANCH" \
+            --override-commit-time "$HEAD_COMMIT_TIME" \
             --override-pr-number "$PR_NUMBER" \
+            --no-validate \
             coverage/lcov.info
