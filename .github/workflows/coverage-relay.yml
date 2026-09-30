@@ -1,0 +1,72 @@
+name: Coverage relay
+
+# Publishes coverage for pull requests from forks. The Coverage workflow runs
+# on the fork's PR without credentials and saves the coverage file as an
+# artifact; this workflow runs in the base repository's context, where an
+# OIDC token is available, and publishes that file against the PR.
+#
+# It never executes code from the pull request: the checkout is only there so
+# the CLI can validate coverage paths against the PR's tree.
+
+on:
+  workflow_run:
+    workflows: [Coverage]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  relay:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find the pull request for this run
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          number=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&head=${HEAD_OWNER}:${HEAD_BRANCH}" --jq '.[0].number')
+          if [ -z "$number" ] || [ "$number" = "null" ]; then
+            echo "No open pull request found for ${HEAD_OWNER}:${HEAD_BRANCH}" >&2
+            exit 1
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pull request's tree
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+
+      - name: Download the coverage file saved by the PR run
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-relay
+          path: coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Install the Qlty CLI
+        uses: qltysh/qlty-action/install@v2
+
+      - name: Publish coverage to Qlty
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          token=$(curl -sSf -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://qlty.sh" | jq -r .value)
+          echo "::add-mask::${token}"
+          QLTY_COVERAGE_TOKEN="$token" qlty coverage publish \
+            --override-commit-sha "$HEAD_SHA" \
+            --override-branch "$HEAD_BRANCH" \
+            --override-pr-number "$PR_NUMBER" \
+            coverage/lcov.info
